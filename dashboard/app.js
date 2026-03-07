@@ -36,6 +36,7 @@ let selectedTrackId = null;
 let activeFilter = 'all';
 let maxObsFeed = 50;
 
+
 // ── INIT MAP ───────────────────────────────────────────────────────────────
 function initMap() {
     map = L.map('map', {
@@ -197,22 +198,7 @@ function renderTrackMarker(track) {
         uncertaintyCircles[track.track_id] = circle;
     }
 
-    // Update path polyline
-    if (track.position_history && track.position_history.length >= 2) {
-        const positions = track.position_history.map(p => [p.latitude, p.longitude]);
-        if (pathPolylines[track.track_id]) {
-            pathPolylines[track.track_id].setLatLngs(positions);
-        } else {
-            const poly = L.polyline(positions, {
-                color: color,
-                weight: 1,
-                opacity: 0.3,
-                dashArray: '3 6',
-            });
-            poly.addTo(map);
-            pathPolylines[track.track_id] = poly;
-        }
-    }
+    // Path polyline disabled
 
     // Bind popup
     const marker = trackMarkers[track.track_id];
@@ -221,9 +207,6 @@ function renderTrackMarker(track) {
 }
 
 function createTrackIcon(track, color) {
-    const affil = track.affiliation || 'unknown';
-    const shape = getTrackShape(affil);
-
     const html = `
     <div class="track-marker" title="${track.track_id}">
       <div class="marker-outer" style="border-color:${color};background:${color}18">
@@ -627,7 +610,7 @@ async function trainModel() {
 
 async function loadScore() {
     try {
-        const resp = await fetch('/api/score');
+        const resp = await fetch('/api/score/fetch');
         const data = await resp.json();
 
         if (data.error) {
@@ -745,7 +728,6 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(pollStatus, 10000);
     pollStatus();
 
-    // Tooltips for map
     map.on('click', () => {
         if (!selectedTrackId) {
             // Map click outside track - clear selection

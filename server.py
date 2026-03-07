@@ -55,7 +55,12 @@ def fetch_score():
         
     try:
         resp = requests.get(f"{api_url}/scores/me", headers={"X-API-Key": api_key}, timeout=10)
-        resp.raise_for_status()
+        if not resp.ok:
+            try:
+                body = resp.json()
+            except Exception:
+                body = {"error": resp.text or resp.reason}
+            return jsonify(body), resp.status_code
         return jsonify(resp.json())
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -393,12 +398,16 @@ def on_request_tracks():
 
 @socketio.on("request_eval")
 def on_request_eval():
-    if g_eval_submitter:
-        def run_bg():
-            result = g_eval_submitter.run_eval()
+    def run_bg():
+        try:
+            from pipeline.eval_runner import run_evaluation_pipeline
+            result = run_evaluation_pipeline()
             socketio.emit("eval_complete", {"result": result})
-        threading.Thread(target=run_bg, daemon=True).start()
-        emit("eval_started", {})
+        except Exception as exc:
+            logger.error(f"Eval pipeline error: {exc}", exc_info=True)
+            socketio.emit("eval_complete", {"result": None, "error": str(exc)})
+    threading.Thread(target=run_bg, daemon=True).start()
+    emit("eval_started", {})
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

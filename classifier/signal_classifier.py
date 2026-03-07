@@ -295,9 +295,12 @@ def extract_features(iq_snapshot: list) -> np.ndarray:
         i_std, q_std, iq_corr, noise_floor,
         # ZCR (2)
         zcr_i, zcr_q,
+        # ASK and PAPR (2)
+        ask_ratio, papr,
         # Pulsed features (2)
         duty_cycle, zcr_amp,
     ], dtype=np.float32)
+
 
     return features
 
@@ -429,8 +432,8 @@ class SignalClassifier:
 
         # Calibrate threshold on validation set
         scores = self.anomaly_detector.decision_function(X_val)
-        # Friendly samples should be +; we set threshold at 5th percentile
-        self._ood_threshold = float(np.percentile(scores, 10))
+        # Friendly samples should be +; we set threshold at 15th percentile
+        self._ood_threshold = float(np.percentile(scores, 15))
         logger.info(f"OOD threshold calibrated at: {self._ood_threshold:.4f}")
 
         self.is_trained = True
@@ -472,7 +475,6 @@ class SignalClassifier:
 
         results = []
         for i in range(len(X)):
-            # Reconstruct feature dict for heuristic classification
             feat = X[i]
             features_dict = {
                 "amp_std": feat[1],
@@ -480,19 +482,21 @@ class SignalClassifier:
                 "freq_std": feat[14],
                 "total_power": feat[17],
                 "spectral_flatness": feat[25],
-                "duty_cycle": feat[82],
-                "ask_ratio": feat[34],
-                "freq_linearity": feat[16]
+                "duty_cycle": feat[84],
+                "ask_ratio": feat[82],
+                "papr": feat[83],
+                "freq_linearity": feat[16],
+                "phase_jumps_180": feat[12],
+                "crest_factor": feat[7],
             }
 
+            friendly_conf = float(confidences[i])
+            ood_score = round(float(ood_scores[i]), 4)
+
             if is_anomaly[i]:
-                # Out-of-distribution: likely hostile or civilian
-                # Use confidence to determine how "unknown" it is
-                friendly_conf = float(confidences[i])
                 ood_conf = float(1.0 - (ood_scores[i] - self._ood_threshold) /
                                   (abs(self._ood_threshold) + 1e-10))
                 ood_conf = max(0.5, min(0.99, ood_conf))
-
                 results.append({
                     "label": "unknown",
                     "confidence": round(ood_conf, 3),
@@ -500,18 +504,18 @@ class SignalClassifier:
                     "is_anomaly": True,
                     "friendly_guess": str(pred_labels[i]),
                     "friendly_confidence": round(friendly_conf, 3),
-                    "ood_score": round(float(ood_scores[i]), 4),
+                    "ood_score": ood_score,
                     "features": features_dict,
                 })
             else:
                 results.append({
                     "label": str(pred_labels[i]),
-                    "confidence": round(float(confidences[i]), 3),
+                    "confidence": round(friendly_conf, 3),
                     "is_friendly": True,
                     "is_anomaly": False,
                     "friendly_guess": str(pred_labels[i]),
-                    "friendly_confidence": round(float(confidences[i]), 3),
-                    "ood_score": round(float(ood_scores[i]), 4),
+                    "friendly_confidence": round(friendly_conf, 3),
+                    "ood_score": ood_score,
                     "features": features_dict,
                 })
 
@@ -608,9 +612,11 @@ def load_training_data(hdf5_path: str) -> tuple[np.ndarray, np.ndarray]:
     X_raw = np.array(X_list, dtype=np.float32)
     y_raw = np.array(y_list, dtype=str)
 
-    # Extract features
-    logger.info(f"Extracting features from {len(X_raw)} samples...")
-    X_feat = np.array([extract_features(x) for x in X_raw])
+    # Extract features in parallel
+    from joblib import Parallel, delayed
+    logger.info(f"Extracting features from {len(X_raw)} samples in parallel...")
+    X_feat = np.array(Parallel(n_jobs=-1)(delayed(extract_features)(x) for x in X_raw))
+
 
     logger.info(f"Loaded {len(X_feat)} samples, shape={X_feat.shape}")
     logger.info(f"Class distribution: {dict(zip(*np.unique(y_raw, return_counts=True)))}")

@@ -693,6 +693,39 @@ html, body {
   100% { width: 60px; height: 60px; opacity: 0; }
 }
 
+/* Radar pulse rings for moving tracks */
+.track-pulse, .track-pulse-slow {
+  position: absolute;
+  border-radius: 50%;
+  border: 1.5px solid;
+  opacity: 0;
+  pointer-events: none;
+}
+
+@keyframes radar-pulse {
+  0%   { width: 20px; height: 20px; opacity: 0.8; transform: rotate(45deg); }
+  100% { width: 70px; height: 70px; opacity: 0;   transform: rotate(45deg); }
+}
+
+@keyframes radar-pulse-slow {
+  0%   { width: 20px; height: 20px; opacity: 0.4; transform: rotate(45deg); }
+  100% { width: 55px; height: 55px; opacity: 0;   transform: rotate(45deg); }
+}
+
+.track-pulse      { animation: radar-pulse 1.2s ease-out infinite; }
+.track-pulse-slow { animation: radar-pulse-slow 2.5s ease-out infinite; }
+
+/* Velocity direction arrow */
+.track-arrow {
+  position: absolute;
+  top: -16px;
+  font-size: 10px;
+  opacity: 0.85;
+  pointer-events: none;
+  transform-origin: center 20px;
+  transition: transform 0.5s;
+}
+
 /* Uncertainty circle */
 .leaflet-interactive.uncertainty-circle {
   stroke-dasharray: 4 4;

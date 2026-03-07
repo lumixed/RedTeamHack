@@ -129,77 +129,93 @@ class FeedConsumer:
         """Process a single observation through the pipeline."""
         self.stats["observations_received"] += 1
 
-        if self.on_observation:
-            try:
-                self.on_observation(obs)
-            except Exception:
-                pass
-
         # 1. Classify the signal
         classification = self.classifier.predict(obs.get("iq_snapshot", []))
         
-        # Apply heuristic mapping for anomalies so the dashboard displays them properly
+        # Apply heuristic mapping for anomalies ONLY if the classifier didn't find a known label
         final_label = classification.get("label", "unknown")
-        if classification.get("is_anomaly") or final_label == "unknown":
+        is_known = final_label in {"Radar-Altimeter", "Satcom", "short-range", "AM radio", "FM radio", "LTE", "WiFi"}
+        
+        if (classification.get("is_anomaly") and not is_known) or final_label == "unknown":
             from pipeline.eval_runner import guess_hostile_type
-            final_label = guess_hostile_type(classification.get("features", {}))
+            final_label = guess_hostile_type(
+                classification.get("features", {}),
+                friendly_guess=classification.get("friendly_guess"),
+            )
             classification["label"] = final_label
 
         # 2. Enrich observation
         obs["_classification"] = classification
 
-        # 3. Associate with other observations
-        group = self.associator.add_observation(obs, classification)
+        if self.on_observation:
+            try:
+                self.on_observation(obs)
+            except Exception:
+                pass
+        
+        # 3. Update simulation clock
+        from .associator import _parse_timestamp
+        self.track_manager.update_clock(obs.get("_parsed_ts", 0.0) or _parse_timestamp(obs.get("timestamp", "")) or 0.0)
 
-        if group:
+        # 4. Associate with other observations
+        groups = self.associator.add_observation(obs, classification)
+
+        for group in groups:
             self.stats["groups_formed"] += 1
             self._process_group(group)
-        else:
-            # Even without a group, submit individual observation
-            self._queue_submission(obs, classification)
+
 
     def _process_group(self, group):
         """Process an observation group through geolocation and track management."""
         # Geolocation
         geo_result = self.geolocator.geolocate(group.observations)
 
-        if geo_result:
-            # Track update
-            import numpy as np
-            from .track_manager import TrackUpdate
-            update = TrackUpdate(
-                timestamp=group.timestamp,
-                latitude=self._safe_float(geo_result.latitude),
-                longitude=self._safe_float(geo_result.longitude),
-                uncertainty_m=self._safe_float(geo_result.uncertainty_m),
-                classification_label=group.classification_label,
-                confidence=self._safe_float(group.classification_confidence, 0.5),
-                n_receivers=geo_result.n_receivers,
-                method=geo_result.method,
-                observation_ids=[o.get("observation_id", "") for o in group.observations],
-                rssi_dbm=self._safe_float(float(np.mean([o.get("rssi_dbm", -80) for o in group.observations])), -80.0),
-                snr_db=self._safe_float(float(np.mean([o.get("snr_estimate_db", 0) for o in group.observations])), 0.0),
-            )
-            track_id = self.track_manager.update(update)
-            self.stats["tracks_updated"] += 1
+        if not geo_result:
+            if len(group.observations) > 1:
+                logger.info(f"Geolocation failed for {group.classification_label} group ({len(group.observations)} obs)")
+            return
 
-            if self.on_track_update:
-                try:
-                    track = next(
-                        (t for t in self.track_manager.all_tracks if t.track_id == track_id),
-                        None
-                    )
-                    if track:
-                        self.on_track_update(track.to_dict(), geo_result)
-                except Exception:
-                    pass
+        # Track update
+        import numpy as np
+        from .track_manager import TrackUpdate
+        update = TrackUpdate(
+            timestamp=group.timestamp,
+            latitude=self._safe_float(geo_result.latitude),
+            longitude=self._safe_float(geo_result.longitude),
+            uncertainty_m=self._safe_float(geo_result.uncertainty_m),
+            classification_label=group.classification_label,
+            confidence=self._safe_float(group.classification_confidence, 0.5),
+            n_receivers=geo_result.n_receivers,
+            method=geo_result.method,
+            observation_ids=[o.get("observation_id", "") for o in group.observations],
+            rssi_dbm=self._safe_float(float(np.mean([o.get("rssi_dbm", -80) for o in group.observations])), -80.0),
+            snr_db=self._safe_float(float(np.mean([o.get("snr_estimate_db", 0) for o in group.observations])), 0.0),
+        )
+        track_id = self.track_manager.update(update)
+        self.stats["tracks_updated"] += 1
 
-        # Submit all observations in the group
+        track = next(
+            (t for t in self.track_manager.all_tracks if t.track_id == track_id),
+            None
+        )
+
+        if self.on_track_update and track:
+            try:
+                self.on_track_update(track.to_dict(), geo_result)
+            except Exception:
+                pass
+
+        # Submit all observations using the group's consensus label + smoothed track position
+        # (group.observations have _-prefixed keys stripped by the associator)
+        group_cls = {
+            "label": group.classification_label,
+            "confidence": group.classification_confidence,
+        }
+        lat = track.latitude if track else geo_result.latitude
+        lon = track.longitude if track else geo_result.longitude
         for obs in group.observations:
-            cls = obs.get("_classification", group.observations[0].get("_classification", {}))
-            lat = geo_result.latitude if geo_result else None
-            lon = geo_result.longitude if geo_result else None
-            self._queue_submission(obs, cls, lat, lon)
+            self._queue_submission(obs, group_cls, lat, lon)
+
 
     def _safe_float(self, val, default=None):
         if val is None: return default
