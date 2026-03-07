@@ -165,19 +165,20 @@ class FeedConsumer:
 
         if geo_result:
             # Track update
+            import numpy as np
             from .track_manager import TrackUpdate
             update = TrackUpdate(
                 timestamp=group.timestamp,
-                latitude=geo_result.latitude,
-                longitude=geo_result.longitude,
-                uncertainty_m=geo_result.uncertainty_m,
+                latitude=self._safe_float(geo_result.latitude),
+                longitude=self._safe_float(geo_result.longitude),
+                uncertainty_m=self._safe_float(geo_result.uncertainty_m),
                 classification_label=group.classification_label,
-                confidence=group.classification_confidence,
+                confidence=self._safe_float(group.classification_confidence, 0.5),
                 n_receivers=geo_result.n_receivers,
                 method=geo_result.method,
                 observation_ids=[o.get("observation_id", "") for o in group.observations],
-                rssi_dbm=float(np.mean([o.get("rssi_dbm", -80) for o in group.observations])),
-                snr_db=float(np.mean([o.get("snr_estimate_db", 0) for o in group.observations])),
+                rssi_dbm=self._safe_float(float(np.mean([o.get("rssi_dbm", -80) for o in group.observations])), -80.0),
+                snr_db=self._safe_float(float(np.mean([o.get("snr_estimate_db", 0) for o in group.observations])), 0.0),
             )
             track_id = self.track_manager.update(update)
             self.stats["tracks_updated"] += 1
@@ -200,6 +201,16 @@ class FeedConsumer:
             lon = geo_result.longitude if geo_result else None
             self._queue_submission(obs, cls, lat, lon)
 
+    def _safe_float(self, val, default=None):
+        if val is None: return default
+        try:
+            f = float(val)
+            import math
+            if math.isnan(f) or math.isinf(f): return default
+            return f
+        except:
+            return default
+
     def _queue_submission(self, obs: dict, classification: dict,
                           lat: float = None, lon: float = None):
         """Queue an observation for submission to the API."""
@@ -208,7 +219,9 @@ class FeedConsumer:
             return
 
         label = classification.get("label", "unknown")
-        confidence = classification.get("confidence", 0.5)
+        confidence = self._safe_float(classification.get("confidence"), 0.5)
+        lat = self._safe_float(lat)
+        lon = self._safe_float(lon)
 
         self._submission_queue.append({
             "observation_id": obs_id,
