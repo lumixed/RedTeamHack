@@ -14,7 +14,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Maximum time window for grouping observations from the same emission
-ASSOCIATION_WINDOW_S = 0.5   # 500ms window
+ASSOCIATION_WINDOW_S = 2.5   # 2.5s window to account for streaming latency
 
 # Max difference in RSSI (dB) for two observations to come from same emitter
 MAX_RSSI_DIFF_DB = 25.0
@@ -57,7 +57,7 @@ class ObservationAssociator:
     def __init__(self):
         # Buffer of recent unassociated observations, keyed by receiver_id
         self._buffer: list[dict] = []
-        self._buffer_timeout: float = 2.0  # Flush groups older than this
+        self._buffer_timeout: float = 5.0  # Flush groups older than this
 
     def add_observation(self, obs: dict, classification: dict) -> Optional[ObservationGroup]:
         """
