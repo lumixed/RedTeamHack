@@ -477,11 +477,12 @@ class SignalClassifier:
             features_dict = {
                 "amp_std": feat[1],
                 "freq_mean": feat[13],
+                "freq_std": feat[14],
                 "total_power": feat[17],
                 "spectral_flatness": feat[25],
-                "duty_cycle": feat[84],  # Updated index
-                "ask_ratio": feat[34],   # spec_kurt? No, wait.
-                "freq_linearity": feat[16] # freq_linearity
+                "duty_cycle": feat[82],
+                "ask_ratio": feat[34],
+                "freq_linearity": feat[16]
             }
 
             if is_anomaly[i]:
