@@ -14,7 +14,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Maximum time window for grouping observations from the same emission
-ASSOCIATION_WINDOW_S = 2.5   # 2.5s window to account for streaming latency
+ASSOCIATION_WINDOW_S = 0.5    # 0.5s window to ensure same-pulse grouping for TDoA
 
 # Max difference in RSSI (dB) for two observations to come from same emitter
 MAX_RSSI_DIFF_DB = 25.0
@@ -59,10 +59,10 @@ class ObservationAssociator:
         self._buffer: list[dict] = []
         self._buffer_timeout: float = 5.0  # Flush groups older than this
 
-    def add_observation(self, obs: dict, classification: dict) -> Optional[ObservationGroup]:
+    def add_observation(self, obs: dict, classification: dict) -> list[ObservationGroup]:
         """
         Add a new classified observation to the buffer.
-        Returns an ObservationGroup if one is now complete, else None.
+        Returns a list of ObservationGroups if any were completed or flushed.
         
         obs: raw observation dict from the feed
         classification: dict from SignalClassifier.predict()
@@ -81,8 +81,8 @@ class ObservationAssociator:
         # Flush old observations into groups
         completed_groups = self._flush_completed_groups(now)
 
-        # Return the most recently completed group (if any)
-        return completed_groups[-1] if completed_groups else None
+        return completed_groups
+
 
     def flush_all(self) -> list[ObservationGroup]:
         """Force flush all buffered observations into groups."""
@@ -163,11 +163,27 @@ class ObservationAssociator:
                 used.add(j)
 
             # Only emit groups where the oldest observation is old enough to be complete,
-            # OR if force=True
-            oldest_ts = min(m["_parsed_ts"] for m in group_members)
-            if force or (now - oldest_ts > ASSOCIATION_WINDOW_S * 1.5):
+            # OR if force=True, OR if we have enough receivers for a good fix.
+            if force or len(group_members) >= 3:
                 group = self._build_group(group_members)
                 groups.append(group)
+            else:
+                # If we only have 1 or 2 receivers, wait until it's "old" enough 
+                # (using the internal parsed timestamps to be skew-invariant)
+                # We use the relative buffer timeout logic
+                pass
+
+        # Also flush any observations that are simply too old (timed out in buffer)
+        # We need a way to detect the "current" simulation time
+        if self._buffer:
+            max_ts = max(o["_parsed_ts"] for o in self._buffer)
+            for i, obs_i in enumerate(self._buffer):
+                if i in used: continue
+                # If this observation is > 5s older than the newest in buffer, 
+                # it's unlikely to get more friends. Flush it as its own group.
+                if max_ts - obs_i["_parsed_ts"] > self._buffer_timeout:
+                    groups.append(self._build_group([obs_i]))
+                    used.add(i)
 
         # Remove grouped observations from buffer
         grouped_ids = set()
@@ -238,8 +254,15 @@ def _cosine_similarity(a: list, b: list) -> float:
     # Normalize length
     min_len = min(len(va), len(vb))
     va, vb = va[:min_len], vb[:min_len]
-    norm_a = np.linalg.norm(va)
-    norm_b = np.linalg.norm(vb)
+    va_comp = va[:min_len//2] + 1j * va[min_len//2:]
+    vb_comp = vb[:min_len//2] + 1j * vb[min_len//2:]
+    
+    # Use magnitude envelope for similarity (invariant to phase rotation)
+    env_a = np.abs(va_comp)
+    env_b = np.abs(vb_comp)
+    
+    norm_a = np.linalg.norm(env_a)
+    norm_b = np.linalg.norm(env_b)
     if norm_a == 0 or norm_b == 0:
         return 0.0
-    return float(np.dot(va, vb) / (norm_a * norm_b))
+    return float(np.dot(env_a, env_b) / (norm_a * norm_b))

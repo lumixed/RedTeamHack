@@ -205,7 +205,7 @@ class GeolocatorEngine:
             result.method = "rssi_2rx"
         return result
 
-    def _geolocate_tdoa(self, toa_obs: list[dict]) -> Optional[GeoResult]:
+    def _geolocate_tdoa(self, toa_obs: list[dict], x0: float = None, y0: float = None) -> Optional[GeoResult]:
         """TDoA-based multilateration using hyperbolic equations."""
         if len(toa_obs) < 3:
             return None
@@ -243,7 +243,10 @@ class GeolocatorEngine:
         b = np.array(b_rows)
 
         try:
-            pos, residuals, _, _ = lstsq(A, b)
+            if x0 is not None and y0 is not None:
+                pos = np.array([x0, y0])
+            else:
+                pos, residuals, _, _ = lstsq(A, b)
         except Exception:
             return None
 
@@ -282,8 +285,14 @@ class GeolocatorEngine:
         """
         Hybrid RSSI + TDoA: use TDoA for primary location, RSSI for validation/refinement.
         """
-        tdoa_result = self._geolocate_tdoa(toa_obs)
         rssi_result = self._geolocate_rssi(rssi_obs)
+        
+        # Use RSSI estimate as initial seed for TDoA to avoid local minima
+        x0, y0 = None, None
+        if rssi_result:
+            x0, y0 = latlon_to_xy(rssi_result.latitude, rssi_result.longitude, self._ref_lat, self._ref_lon)
+            
+        tdoa_result = self._geolocate_tdoa(toa_obs, x0=x0, y0=y0)
 
         if tdoa_result is None:
             return rssi_result
@@ -336,17 +345,24 @@ class GeolocatorEngine:
 
     def _compute_gdop(self, pos: np.ndarray, rx_positions: np.ndarray) -> float:
         """Compute Geometric Dilution of Precision."""
+        if len(rx_positions) < 2:
+            return 10.0
         try:
             H = []
             for rx in rx_positions:
                 d = np.sqrt((pos[0] - rx[0])**2 + (pos[1] - rx[1])**2) + 1e-10
                 H.append([(pos[0] - rx[0]) / d, (pos[1] - rx[1]) / d])
             H = np.array(H)
-            Q = np.linalg.inv(H.T @ H)
-            gdop = float(np.sqrt(np.trace(Q)))
-            return min(gdop, 100.0)
+            HTH = H.T @ H
+            HTH += np.eye(2) * 0.001  # Regularization
+            Q = np.linalg.inv(HTH)
+            trace = np.trace(Q)
+            if trace <= 0: return 10.0
+            gdop = float(np.sqrt(trace))
+            return min(gdop, 50.0)
         except Exception:
             return 10.0
+
 
 
 class KalmanTracker:
@@ -368,7 +384,9 @@ class KalmanTracker:
         ])
 
         # Process noise (emitter can accelerate)
-        self.Q = np.diag([50.0**2, 50.0**2, 20.0**2, 20.0**2])
+        # Position noise is small to keep track stable, velocity noise allows for movement
+        self.Q = np.diag([5.0**2, 5.0**2, 15.0**2, 15.0**2])
+
 
         # Measurement noise (position uncertainty from geolocation)
         self.R_base = np.diag([200.0**2, 200.0**2])

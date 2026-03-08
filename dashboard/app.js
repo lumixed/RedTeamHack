@@ -5,23 +5,23 @@
 
 // ── CONFIG ─────────────────────────────────────────────────────────────────
 const AFFILIATION_COLORS = {
-    friendly: '#00e676',
-    hostile: '#ff1744',
-    unknown: '#ff9100',
-    civilian: '#448aff',
-    stale: '#546e7a',
+    friendly: '#00ffd0', // Neon Cyan/Green
+    hostile: '#ff2d55', // Neon Red
+    unknown: '#ff9f0a', // Neon Orange
+    civilian: '#5856d6', // Tactical Indigo
+    stale: '#8e8e93', // System Gray
 };
 
 const LABEL_COLORS = {
-    'Radar-Altimeter': '#00e676',
-    'Satcom': '#00e676',
-    'short-range': '#00e676',
-    'Airborne-detection': '#ff1744',
-    'Airborne-range': '#ff1744',
-    'Air-Ground-MTI': '#ff1744',
-    'EW-Jammer': '#ff1744',
-    'AM radio': '#448aff',
-    'unknown': '#ff9100',
+    'Radar-Altimeter': '#00ffd0',
+    'Satcom': '#00ffd0',
+    'short-range': '#00ffd0',
+    'Airborne-detection': '#ff2d55',
+    'Airborne-range': '#ff2d55',
+    'Air-Ground-MTI': '#ff2d55',
+    'EW-Jammer': '#ff2d55',
+    'AM radio': '#5856d6',
+    'unknown': '#ff9f0a',
 };
 
 // ── STATE ──────────────────────────────────────────────────────────────────

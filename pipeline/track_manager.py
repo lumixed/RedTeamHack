@@ -132,6 +132,7 @@ class TrackManager:
         self._tracks: dict[str, EmitterTrack] = {}
         self._ref_lat = ref_lat
         self._ref_lon = ref_lon
+        self._latest_ts = 0.0
 
     @property
     def active_tracks(self) -> list[EmitterTrack]:
@@ -142,12 +143,20 @@ class TrackManager:
     def all_tracks(self) -> list[EmitterTrack]:
         return list(self._tracks.values())
 
+    def update_clock(self, ts: float):
+        """Update the internal simulation clock."""
+        if ts > self._latest_ts:
+            self._latest_ts = ts
+
     def update(self, update: TrackUpdate) -> str:
         """
         Process a track update.
         Returns track_id of the updated/created track.
         """
-        now = time.time()
+        if update.timestamp > self._latest_ts:
+            self._latest_ts = update.timestamp
+        
+        now = self._latest_ts or time.time()
 
         # Try to associate with existing track
         track = self._find_best_match(update)
@@ -155,7 +164,7 @@ class TrackManager:
         if track is None:
             # Create new tentative track
             track = self._create_track(update)
-            logger.debug(f"Created new track {track.track_id} for {update.classification_label}")
+            logger.info(f"CREATED new track {track.track_id} for {update.classification_label} at {update.latitude}, {update.longitude}")
         else:
             logger.debug(f"Updating track {track.track_id} with new observation")
 
@@ -321,7 +330,12 @@ class TrackManager:
 
     def age_tracks(self):
         """Age out stale and lost tracks based on time since last update."""
-        now = time.time()
+        # Use latest observation time as the 'now' for aging.
+        # If no updates seen yet, don't age tracks (prevents immediate stale on startup)
+        if self._latest_ts == 0.0:
+            return
+            
+        now = self._latest_ts
         for track in list(self._tracks.values()):
             age = now - track.last_seen
             if track.state == TRACK_STATES["LOST"]:
