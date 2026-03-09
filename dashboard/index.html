@@ -138,7 +138,15 @@
             <!-- Track Filter -->
             <section class="panel-section">
                 <div class="section-header">
-                    <span class="section-title">TRACK FILTER</span>
+                    <span class="section-title">SMART FILTER</span>
+                </div>
+                <div class="search-box">
+                    <input type="text" id="track-search" placeholder="Search Track ID..."
+                        oninput="handleFilterChange()">
+                    <svg viewBox="0 0 24 24" fill="none" class="search-icon">
+                        <circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="2" />
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" stroke="currentColor" stroke-width="2" />
+                    </svg>
                 </div>
                 <div class="filter-pills">
                     <button class="filter-pill active" data-filter="all" onclick="setFilter(this, 'all')">ALL</button>
@@ -148,8 +156,23 @@
                         onclick="setFilter(this, 'hostile')">HOSTILE</button>
                     <button class="filter-pill unknown" data-filter="unknown"
                         onclick="setFilter(this, 'unknown')">UNKNOWN</button>
-                    <button class="filter-pill civilian" data-filter="civilian"
-                        onclick="setFilter(this, 'civilian')">CIVILIAN</button>
+                </div>
+                <div class="advanced-filters">
+                    <div class="filter-row">
+                        <label>SIGNAL TYPE</label>
+                        <select id="signal-filter" onchange="handleFilterChange()">
+                            <option value="all">ALL TYPES</option>
+                            <option value="Radar-Altimeter">RADAR-ALTIMETER</option>
+                            <option value="Satcom">SATCOM</option>
+                            <option value="Airborne-detection">AIRBORNE-DETECTION</option>
+                            <option value="EW-Jammer">EW-JAMMER</option>
+                            <option value="short-range">SHORT-RANGE</option>
+                        </select>
+                    </div>
+                    <div class="filter-row">
+                        <label>CONFIDENCE > <span id="conf-val">0</span>%</label>
+                        <input type="range" id="conf-filter" min="0" max="100" value="0" oninput="handleFilterChange()">
+                    </div>
                 </div>
             </section>
 
