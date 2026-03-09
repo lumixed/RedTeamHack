@@ -34,7 +34,13 @@ let pathPolylines = {};      // track_id → Leaflet polyline
 let receiverMarkers = [];    // Leaflet markers for receivers
 let selectedTrackId = null;
 let activeFilter = 'all';
+let searchQuery = '';
+let signalFilter = 'all';
+let confidenceFilter = 0;
+let showTrails = true;
+let showProjections = true;
 let maxObsFeed = 50;
+let projectionPolylines = {}; // track_id → Leaflet polyline
 
 
 // ── INIT MAP ───────────────────────────────────────────────────────────────
@@ -183,6 +189,7 @@ function renderTrackMarker(track) {
     if (uncertaintyCircles[track.track_id]) {
         uncertaintyCircles[track.track_id].setLatLng([lat, lon]);
         uncertaintyCircles[track.track_id].setRadius(track.uncertainty_m || 200);
+        uncertaintyCircles[track.track_id].setStyle({ color: color, fillColor: color });
     } else {
         const circle = L.circle([lat, lon], {
             radius: track.uncertainty_m || 200,
@@ -198,7 +205,46 @@ function renderTrackMarker(track) {
         uncertaintyCircles[track.track_id] = circle;
     }
 
-    // Path polyline disabled
+    // --- THE TRAIL (Historical Paths) ---
+    const historyPoints = (track.position_history || []).map(p => [p.latitude, p.longitude]);
+    if (historyPoints.length > 1) {
+        if (pathPolylines[track.track_id]) {
+            pathPolylines[track.track_id].setLatLngs(historyPoints);
+            pathPolylines[track.track_id].setStyle({ color: color });
+        } else {
+            const poly = L.polyline(historyPoints, {
+                color: color,
+                weight: 2,
+                opacity: 0.4,
+                dashArray: '2, 6',
+                smoothFactor: 1
+            }).addTo(map);
+            pathPolylines[track.track_id] = poly;
+        }
+    }
+
+    // --- AI PROJECTION (Predicted Paths) ---
+    if (track.velocity_mps && track.velocity_mps.speed_mps > 0.1) {
+        const projectedPoints = calculateProjection(track);
+        if (projectedPoints.length > 1) {
+            if (projectionPolylines[track.track_id]) {
+                projectionPolylines[track.track_id].setLatLngs(projectedPoints);
+                projectionPolylines[track.track_id].setStyle({ color: color });
+            } else {
+                const poly = L.polyline(projectedPoints, {
+                    color: color,
+                    weight: 2,
+                    opacity: 0.6,
+                    dashArray: '5, 10',
+                    className: 'projection-line'
+                }).addTo(map);
+                projectionPolylines[track.track_id] = poly;
+            }
+        }
+    } else if (projectionPolylines[track.track_id]) {
+        map.removeLayer(projectionPolylines[track.track_id]);
+        delete projectionPolylines[track.track_id];
+    }
 
     // Bind popup
     const marker = trackMarkers[track.track_id];
@@ -239,6 +285,25 @@ function removeTrackMarker(trackId) {
     if (trackMarkers[trackId]) { map.removeLayer(trackMarkers[trackId]); delete trackMarkers[trackId]; }
     if (uncertaintyCircles[trackId]) { map.removeLayer(uncertaintyCircles[trackId]); delete uncertaintyCircles[trackId]; }
     if (pathPolylines[trackId]) { map.removeLayer(pathPolylines[trackId]); delete pathPolylines[trackId]; }
+    if (projectionPolylines[trackId]) { map.removeLayer(projectionPolylines[trackId]); delete projectionPolylines[trackId]; }
+}
+
+function calculateProjection(track) {
+    const points = [[track.latitude, track.longitude]];
+    const vel = track.velocity_mps;
+    if (!vel) return points;
+
+    // Meters to degrees (rough approximation for projection)
+    const latPerMeter = 1 / 111111;
+    const lonPerMeter = 1 / (111111 * Math.cos(track.latitude * Math.PI / 180));
+
+    // Project 30, 60, 90 seconds ahead
+    [30, 60, 90].forEach(seconds => {
+        const nextLat = track.latitude + (vel.vy_mps * seconds * latPerMeter);
+        const nextLon = track.longitude + (vel.vx_mps * seconds * lonPerMeter);
+        points.push([nextLat, nextLon]);
+    });
+    return points;
 }
 
 function buildPopupContent(track) {
@@ -271,7 +336,26 @@ function renderTrackList() {
     const tracks = Object.values(allTracks)
         .filter(t => t.state !== 'lost')
         .filter(t => activeFilter === 'all' || t.affiliation === activeFilter)
+        .filter(t => !searchQuery || t.track_id.toLowerCase().includes(searchQuery.toLowerCase()))
+        .filter(t => signalFilter === 'all' || t.classification_label === signalFilter)
+        .filter(t => (t.classification_confidence * 100) >= confidenceFilter)
         .sort((a, b) => b.last_seen - a.last_seen);
+
+    // Also update map filters
+    Object.keys(allTracks).forEach(id => {
+        const track = allTracks[id];
+        const marker = trackMarkers[id];
+        const circle = uncertaintyCircles[id];
+        const poly = pathPolylines[id];
+        const proj = projectionPolylines[id];
+
+        const visible = tracks.some(t => t.track_id === id);
+
+        if (marker) visible ? marker.addTo(map) : map.removeLayer(marker);
+        if (circle) visible ? circle.addTo(map) : map.removeLayer(circle);
+        if (poly) (visible && showTrails) ? poly.addTo(map) : map.removeLayer(poly);
+        if (proj) (visible && showProjections) ? proj.addTo(map) : map.removeLayer(proj);
+    });
 
     document.getElementById('track-count-badge').textContent = tracks.length;
 
@@ -580,6 +664,16 @@ function setFilter(btn, filter) {
     activeFilter = filter;
     document.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
+    renderTrackList();
+}
+
+function handleFilterChange() {
+    searchQuery = document.getElementById('track-search').value;
+    signalFilter = document.getElementById('signal-filter').value;
+    confidenceFilter = parseInt(document.getElementById('conf-filter').value);
+    showTrails = document.getElementById('toggle-trails').checked;
+    showProjections = document.getElementById('toggle-projections').checked;
+    document.getElementById('conf-val').textContent = confidenceFilter;
     renderTrackList();
 }
 
