@@ -9,7 +9,7 @@ import uuid
 import logging
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List
 from collections import deque
 
 from .geolocator import GeoResult, KalmanTracker, latlon_to_xy, xy_to_latlon
@@ -70,8 +70,9 @@ class EmitterTrack:
     n_receivers: int
 
     # History
-    position_history: list[dict] = field(default_factory=list)
-    classification_history: list[dict] = field(default_factory=list)
+    position_history: List[dict] = field(default_factory=list)
+    classification_history: List[dict] = field(default_factory=list)
+    rssi_history: List[float] = field(default_factory=list)
     observation_count: int = 0
     update_count: int = 0
 
@@ -102,7 +103,8 @@ class EmitterTrack:
             "is_stale": is_stale,
             "observation_count": self.observation_count,
             "update_count": self.update_count,
-            "position_history": self.position_history[-20:],  # Last 20 positions
+            "position_history": list(self.position_history)[-20:],  # Last 20 positions
+            "rssi_history": list(self.rssi_history)[-20:],      # Last 20 RSSI readings
             "velocity_mps": self._get_velocity(),
         }
 
@@ -312,6 +314,11 @@ class TrackManager:
         })
         if len(track.position_history) > self.MAX_HISTORY:
             track.position_history = track.position_history[-self.MAX_HISTORY:]
+
+        # Record RSSI
+        track.rssi_history.append(float(f"{update.rssi_dbm:.1f}"))
+        if len(track.rssi_history) > self.MAX_HISTORY:
+            track.rssi_history = list(track.rssi_history)[-self.MAX_HISTORY:]
 
         track.classification_history.append({
             "timestamp": update.timestamp or now,

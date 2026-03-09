@@ -1615,3 +1615,33 @@ body {
     background: var(--border);
     border-radius: 2px;
 }
+/* Sparkline */
+.detail-history-section {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+}
+
+.rssi-sparkline {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 40px;
+    margin-top: 10px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+    padding: 4px;
+}
+
+.spark-bar {
+    flex: 1;
+    background: var(--col-accent2);
+    border-radius: 1px;
+    min-width: 4px;
+    transition: height 0.3s;
+}
+
+.spark-bar:hover {
+    background: var(--col-accent);
+    box-shadow: 0 0 8px var(--col-accent);
+}

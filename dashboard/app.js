@@ -517,6 +517,16 @@ function renderTrackDetail(track) {
           ${track.is_stale ? 'YES' : 'NO'}
         </span>
       </div>
+
+      <div class="detail-history-section">
+        <span class="detail-row-label">SIGNAL HISTORY (RSSI)</span>
+        <div class="rssi-sparkline">
+          ${(track.rssi_history || []).map(rssi => {
+        const height = Math.min(100, Math.max(0, (rssi + 120) * 1.5)); // Map -120..-40 to 0..100
+        return `<div class="spark-bar" style="height:${height}%" title="${rssi} dBm"></div>`;
+    }).join('')}
+        </div>
+      </div>
     </div>`;
 }
 
