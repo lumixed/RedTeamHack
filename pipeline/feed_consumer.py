@@ -8,9 +8,11 @@ Also handles submission to the scoring API.
 import os
 import time
 import json
+import queue
 import logging
 import threading
 import requests
+import numpy as np
 from collections import deque
 from typing import Optional, Callable
 from datetime import datetime
@@ -24,6 +26,13 @@ API_KEY = os.getenv("API_KEY", "")
 # Rate limiting
 SUBMIT_COOLDOWN_S = 1.0  # Min seconds between submissions
 EVAL_SUBMIT_COOLDOWN_S = 60.0  # Min seconds between eval submissions
+
+# Classifying one observation at a time is almost entirely scikit-learn call
+# overhead: a single sample costs 57ms, ten together cost 5ms each. Reading is
+# split from processing so a slow classifier stalls its own queue instead of
+# backing up the HTTP stream.
+BATCH_MAX = 12
+BATCH_MAX_WAIT_S = 1.0
 
 
 class FeedConsumer:
@@ -50,6 +59,8 @@ class FeedConsumer:
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._worker: Optional[threading.Thread] = None
+        self._inbox: queue.Queue = queue.Queue(maxsize=2000)
         self._last_submit_time = 0.0
         self._submission_queue: deque = deque(maxlen=500)
         self._submitted_ids: set = set()
@@ -61,6 +72,7 @@ class FeedConsumer:
             "tracks_updated": 0,
             "submissions_sent": 0,
             "errors": 0,
+            "dropped": 0,
             "start_time": None,
         }
 
@@ -70,6 +82,8 @@ class FeedConsumer:
         self.stats["start_time"] = time.time()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
+        self._worker = threading.Thread(target=self._process_loop, daemon=True)
+        self._worker.start()
         logger.info("Feed consumer started")
 
     def stop(self):
@@ -118,24 +132,62 @@ class FeedConsumer:
                     data_str = line[6:].strip()
                     if data_str:
                         try:
-                            self._process_observation(json.loads(data_str))
+                            self._inbox.put_nowait(json.loads(data_str))
                         except json.JSONDecodeError:
                             pass
-                        except Exception as e:
-                            logger.warning(f"Error processing observation: {e}")
-                            self.stats["errors"] += 1
+                        except queue.Full:
+                            self.stats["dropped"] += 1
 
-    def _process_observation(self, obs: dict):
-        """Process a single observation through the pipeline."""
+    def _process_loop(self):
+        """Drain the inbox in batches so classification amortizes its overhead."""
+        while self._running:
+            batch = []
+            deadline = None
+            while len(batch) < BATCH_MAX:
+                timeout = BATCH_MAX_WAIT_S if deadline is None else max(
+                    0.0, deadline - time.time())
+                try:
+                    batch.append(self._inbox.get(timeout=timeout))
+                except queue.Empty:
+                    break
+                if deadline is None:
+                    deadline = time.time() + BATCH_MAX_WAIT_S
+                elif time.time() >= deadline:
+                    break
+
+            if not batch:
+                continue
+            try:
+                self._process_batch(batch)
+            except Exception as e:
+                logger.warning(f"Error processing batch of {len(batch)}: {e}")
+                self.stats["errors"] += 1
+
+    def _process_batch(self, observations: list):
+        from classifier.signal_classifier import extract_features
+
+        raws = []
+        for obs in observations:
+            iq = np.array(obs.get("iq_snapshot", []), dtype=np.float32)
+            if len(iq) != 256:
+                iq = np.pad(iq, (0, max(0, 256 - len(iq))))[:256]
+            raws.append(iq)
+
+        X_raw = np.array(raws, dtype=np.float32)
+        X_feat = np.array([extract_features(r) for r in raws])
+        results = self.classifier.predict_hybrid(X_feat, X_raw)
+
+        for obs, classification in zip(observations, results):
+            self._process_observation(obs, classification)
+
+    def _process_observation(self, obs: dict, classification: dict):
+        """Run one already-classified observation through the rest of the pipeline."""
         self.stats["observations_received"] += 1
 
-        # 1. Classify the signal
-        classification = self.classifier.predict(obs.get("iq_snapshot", []))
-        
         # Apply heuristic mapping for anomalies ONLY if the classifier didn't find a known label
         final_label = classification.get("label", "unknown")
         is_known = final_label in {"Radar-Altimeter", "Satcom", "short-range", "AM radio", "FM radio", "LTE", "WiFi"}
-        
+
         if (classification.get("is_anomaly") and not is_known) or final_label == "unknown":
             from pipeline.eval_runner import guess_hostile_type
             final_label = guess_hostile_type(
@@ -144,7 +196,6 @@ class FeedConsumer:
             )
             classification["label"] = final_label
 
-        # 2. Enrich observation
         obs["_classification"] = classification
 
         if self.on_observation:

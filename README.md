@@ -2,6 +2,8 @@
 
 **Real-time RF signal classification, emitter geolocation, and multi-target tracking.**
 
+**[▶ Live demo](https://findmyforce-jefferson.fly.dev/)**
+
 Passive receivers pick up radar and comms emissions. The pipeline classifies each one,
 flags anything that isn't a known friendly, trilaterates the emitter from RSSI and
 time-of-arrival, and tracks it across a live tactical map.
@@ -215,25 +217,34 @@ git, and every image is reproducible from source.
 to the CUDA build and drags in several gigabytes of NVIDIA runtime that this project
 never touches. The Dockerfile pins the CPU wheel index before installing anything else.
 
-**It idles at zero cost.** This is not a request/response app — the pipeline classifies
-continuously whenever the machine is up, so an always-on instance burns CPU with nobody
-watching. The machine is therefore allowed to stop when idle.
+**One machine is kept warm on purpose.** This is not a request/response app — the pipeline
+classifies continuously whenever the machine is up, so the tempting move is to let the
+instance stop when idle and pay nothing. That was the original setup, and it does not
+survive contact with a real visitor.
 
-The catch is that a stopped machine has to rebuild its entire picture, and the tracker
-will not confirm a track until it has seen two emissions from that emitter. So startup
-pre-rolls 25 seconds of scenario into a replay buffer, and the pipeline drains it while
-the server is still coming up. The map is already populated by the time the app answers
-its first request, rather than showing an empty map for another half-minute:
+From cold, this container has to start Python, import scipy, scikit-learn and torch, load
+the model, and generate a scenario, all on one shared core. Measured on Fly, the same cold
+start took **33s, 20s and 48s on three consecutive attempts** — the spread is vCPU
+scheduling, not anything the code controls. At the slow end a proxy gives up before the
+port opens and serves an error page. So `min_machines_running = 1`, and every visit is
+about 1.6 seconds.
 
-| From cold | Local | Deployed (Fly, shared-cpu-1x) |
-|---|---|---|
-| App answers first request | 1.6s | 31s |
-| Full picture, 8 confirmed tracks | 9.0s | 33s |
+Two things still matter for the moments when the process *is* starting, because a bad
+startup path turns a slow boot into a broken one:
 
-Nearly all of the deployed number is machine boot plus importing torch and loading the
-model on a shared vCPU — not the pipeline, which contributes the last two seconds. A
-visitor waits about half a minute for the page, then sees a complete picture immediately.
-Set `min_machines_running = 1` in `fly.toml` to trade roughly $5/month for instant loads.
+- **The server binds before it is ready, and says so.** It never waits on the range to
+  come up, initializes on a background thread, and reports the feed as NO DATA until the
+  pipeline is live. Anything that blocks between process start and `listen()` — a module
+  that initializes at import, a `before_request` hook that runs setup inline, an
+  unnecessary torch import — reads to a proxy as an app that refuses connections.
+- **Startup pre-rolls 25 seconds of scenario** into a replay buffer, which the pipeline
+  drains while the server is still coming up. The tracker will not confirm a track until
+  it has seen two emissions from an emitter, so without this the map sits empty for a
+  further half-minute after the page loads. From cold locally: port open in 0.6s, first
+  track at 3.1s, eight confirmed tracks by 7.7s.
+
+To trade the monthly cost back for cold starts, set `min_machines_running = 0` and
+`auto_stop_machines = "stop"`.
 
 ---
 
@@ -382,6 +393,30 @@ an unbounded leak that only a long-running feed reveals.
 polygon cut p90 position error from 106 m to 22 m without touching a line of solver
 code. Dilution of precision does what the textbook says it does.
 
+**Nothing may block between process start and `listen()`.** Deployed, the app served an
+error page: the platform proxy retried for a minute, found the port closed, and gave up.
+The machine had booted in 1.9 seconds. Everything after that was self-inflicted — an
+entrypoint that waited for a dependency before starting the server, a module that ran its
+initialization at import, a `before_request` hook that ran setup inline so the port opened
+but no request ever returned, and a torch import sitting in front of the bind. Each was
+invisible locally, where every one of those steps costs a fraction of a second. Bind
+first, initialize on a thread, and report readiness honestly.
+
+**A solver that fails to converge still returns a number.** The tracker created a track at
+latitude 164°, which is not a place. Least-squares handed back a diverged result, nothing
+between there and the map questioned it, and it became a marker. Range-check anything that
+comes out of an optimizer before it becomes state.
+
+**Profile before optimizing, especially when you are sure you know the answer.** Deployed,
+the pipeline processed 1.1 observations/second against the 10/second the feed produced, so
+tracks kept starving and dying. The obvious suspect was the 86-feature extraction — FFTs,
+31 autocorrelation lags, LPC solves. It was 0.9 ms, under 2% of the cost. The real expense
+was scikit-learn call overhead: a `QuantileTransformer` at 20 ms and a `CalibratedClassifierCV`
+wrapping a voting ensemble at 31 ms, both for a *single* sample, because `cv=3` over two
+models means six model evaluations per observation. Batching twelve observations cut the
+per-observation cost 11× and took the deployed pipeline from 1.1 to 9.3 observations/second.
+Nothing about the algorithm changed — only how many rows went in per call.
+
 ---
 
 ## Limitations
@@ -396,9 +431,10 @@ Worth being direct about, since this is a portfolio piece rather than a product:
   detection, so the model is tuned to miss few hostiles at the price of some false
   alarms. Tighten `OOD_PERCENTILE` in `classifier/signal_classifier.py` to trade the
   other way.
-- **Classification runs at roughly 14 observations/second** single-threaded (~73 ms per
-  snapshot). The simulator is paced to stay inside that budget; a faster feed would need
-  batched inference.
+- **Classification is batched, and needs to be.** One observation at a time costs ~57 ms,
+  of which only 1 ms is signal processing; the rest is scikit-learn per-call overhead.
+  Twelve at a time costs ~5 ms each. The feed reader and the classifier run on separate
+  threads so a slow batch stalls its own queue rather than backing up the HTTP stream.
 - **The simulator models a flat-earth propagation environment** — no terrain masking, no
   antenna patterns, no Doppler.
 

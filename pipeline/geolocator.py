@@ -134,6 +134,20 @@ class GeolocatorEngine:
         else:
             return None
 
+        if result is None:
+            return None
+
+        # A least-squares solve that fails to converge can land somewhere that is
+        # not a point on Earth. Report no fix rather than letting the track manager
+        # accept it and put a marker at an impossible coordinate.
+        lat, lon = result.latitude, result.longitude
+        if not (np.isfinite(lat) and np.isfinite(lon)):
+            logger.warning("Discarding non-finite position fix")
+            return None
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            logger.warning(f"Discarding out-of-range position fix: {lat:.4f}, {lon:.4f}")
+            return None
+
         return result
 
     def _geolocate_rssi(self, obs: list[dict]) -> GeoResult:

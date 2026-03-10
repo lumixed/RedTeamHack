@@ -61,7 +61,15 @@ class FeedHub:
         self.best_total = 0.0
         self.started = time.time()
         self.emitted = 0
-        self.eval_set, self.eval_truth = self._build_eval_set()
+        self._eval = None
+        self._eval_lock = threading.Lock()
+
+    def eval_data(self):
+        """Built on first use; keeping it off the startup path speeds up binding."""
+        with self._eval_lock:
+            if self._eval is None:
+                self._eval = self._build_eval_set()
+        return self._eval
 
     def _build_eval_set(self):
         """A fixed held-out set, emitters kept consecutive as the eval runner assumes."""
@@ -80,7 +88,9 @@ class FeedHub:
         return observations, truth
 
     def start(self):
-        self.prefill()
+        # Prefill runs inside the worker rather than before it, so the port binds
+        # immediately. Generating a scenario takes long enough on a small vCPU that
+        # doing it first leaves the platform's proxy knocking on a closed socket.
         threading.Thread(target=self._run, daemon=True).start()
 
     def prefill(self):
@@ -105,6 +115,7 @@ class FeedHub:
         logger.info(f"Pre-rolled {PREROLL_S:.0f}s of scenario, {len(self.backlog)} observations buffered")
 
     def _run(self):
+        self.prefill()
         while True:
             self.scenario.advance(TICK_S)
             for emitter in self.scenario.due():
@@ -274,13 +285,15 @@ def create_app(hub):
 
     @app.get("/evaluate/observations")
     def eval_observations():
-        return jsonify({"observations": hub.eval_set})
+        observations, _ = hub.eval_data()
+        return jsonify({"observations": observations})
 
     @app.post("/evaluate/submit")
     def eval_submit():
         body = request.get_json(silent=True) or {}
         submissions = body.get("submissions", [])
-        result = score_submissions(submissions, hub.eval_truth)
+        observations, truth = hub.eval_data()
+        result = score_submissions(submissions, truth)
         if result is None:
             return jsonify({"error": "no scorable submissions"}), 400
 
@@ -288,7 +301,7 @@ def create_app(hub):
         hub.best_total = max(hub.best_total, result["total_score"])
         return jsonify({
             "attempt_number": len(hub.eval_attempts),
-            "coverage": round(100.0 * result["matched"] / max(len(hub.eval_set), 1), 1),
+            "coverage": round(100.0 * result["matched"] / max(len(observations), 1), 1),
             "total_score": result["total_score"],
             "classification_score": result["classification_score"],
             "geolocation_score": result["geolocation_score"],

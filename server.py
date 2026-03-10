@@ -24,7 +24,6 @@ sys.path.insert(0, str(ROOT_DIR))
 from dotenv import load_dotenv
 load_dotenv(ROOT_DIR / ".env")
 
-from classifier import SignalClassifier, load_training_data, FRIENDLY_LABELS
 from pipeline import (
     GeolocatorEngine, ReceiverInfo, PathLossModel,
     TrackManager, TrackUpdate,
@@ -54,7 +53,10 @@ CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
 
 # ── Global State ──────────────────────────────────────────────────────────────
-g_classifier = SignalClassifier()
+# Built during initialization rather than at import. Constructing it here would
+# pull torch in before the socket is bound, which on a small vCPU keeps the port
+# closed long enough for a proxy to give up on the app.
+g_classifier = None
 g_track_manager = TrackManager()
 g_associator = ObservationAssociator()
 g_geolocator: Optional[GeolocatorEngine] = None
@@ -78,6 +80,24 @@ g_server_status = {
 # ── Initialization ─────────────────────────────────────────────────────────────
 _initialized = False
 
+
+def _fetch_config(attempts=90, delay=2.0):
+    """Poll the range for receiver and path-loss config until it answers."""
+    for attempt in range(attempts):
+        try:
+            rx_data, pl_data = get_config()
+            if rx_data:
+                return rx_data, pl_data
+        except Exception as e:
+            logger.debug(f"Config fetch failed: {e}")
+        if attempt == 0:
+            logger.info("Range not answering yet, waiting for it to come up")
+        time.sleep(delay)
+
+    logger.error(f"Range never returned a receiver config after {attempts} attempts")
+    return None, None
+
+
 def initialize_system(force=False):
     """
     Initialize the full pipeline:
@@ -86,19 +106,22 @@ def initialize_system(force=False):
     3. Start feed consumer (if not in serverless mode)
     """
     global g_geolocator, g_feed_consumer, g_eval_submitter, _initialized
-    global g_receiver_config, g_pathloss_config
+    global g_receiver_config, g_pathloss_config, g_classifier
 
     if _initialized and not force:
         return
-    
+
+    from classifier import SignalClassifier
+    if g_classifier is None:
+        g_classifier = SignalClassifier()
+
     logger.info("=== Initializing Find My Force Pipeline ===")
 
-    # 1. Fetch server config (Fast)
-    try:
-        rx_data, pl_data = get_config()
-    except Exception as e:
-        logger.error(f"Failed to fetch config: {e}")
-        rx_data, pl_data = None, None
+    # 1. Fetch server config. Keep asking rather than accepting the first refusal:
+    # this runs while the range may still be starting, and giving up here leaves
+    # the pipeline with no receivers for the rest of the process lifetime, able to
+    # classify but never to geolocate.
+    rx_data, pl_data = _fetch_config(attempts=90, delay=2.0)
 
     if rx_data:
         g_receiver_config = rx_data
@@ -216,11 +239,28 @@ def initialize_system(force=False):
 
     _initialized = True
 
+_init_thread = None
+_init_lock = threading.Lock()
+
+
+def start_initialization():
+    """Kick off initialization once, in the background."""
+    global _init_thread
+    with _init_lock:
+        if _init_thread is None:
+            _init_thread = threading.Thread(target=initialize_system, daemon=True)
+            _init_thread.start()
+
+
 @app.before_request
 def ensure_initialized():
-    """Ensure system is initialized before first request on Vercel."""
+    """
+    Make sure initialization is under way, without waiting for it. Running it
+    inline here blocks every request for as long as the range takes to come up,
+    which reads to a proxy as an app that accepts connections but never answers.
+    """
     if not _initialized:
-        initialize_system()
+        start_initialization()
 
 
 # ── REST API Endpoints ─────────────────────────────────────────────────────────
@@ -294,8 +334,9 @@ def api_train():
 
     def train_bg():
         try:
-            X, y = load_training_data(hdf5_path)
-            metrics = g_classifier.train(X, y)
+            from classifier import load_training_data
+            X_feat, X_raw, y = load_training_data(hdf5_path)
+            metrics = g_classifier.train(X_feat, X_raw, y)
             g_classifier.save()
             g_server_status["classifier_trained"] = True
             g_server_status["training_metrics"] = metrics
@@ -317,6 +358,8 @@ def api_classify():
     body = request.get_json()
     if not body or "iq_snapshot" not in body:
         return jsonify({"error": "No iq_snapshot provided"}), 400
+    if g_classifier is None:
+        return jsonify({"error": "Classifier still loading"}), 503
     return jsonify(g_classifier.predict(body["iq_snapshot"]))
 
 
@@ -408,12 +451,12 @@ def on_request_eval():
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+# Nothing is initialized at import. Callers start initialize_system() on a thread
+# and bind their socket straight away; it waits on the range, and blocking the
+# import on that would hold the listening port closed for as long as the range
+# takes to come up.
 if __name__ == "__main__":
-    # Initialize in background thread for local dev
-    initialize_system()
+    start_initialization()
     port = int(os.getenv("PORT", 5000))
     logger.info(f"Starting dashboard on http://localhost:{port}")
     socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
-else:
-    # On Vercel, app is imported. Initialize here.
-    initialize_system()

@@ -14,15 +14,15 @@ primary_region = "sin"
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = "off"
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ["app"]
 
-  # The pipeline classifies continuously while the machine is up, so leaving it
-  # running costs CPU with nobody watching. Startup pre-rolls the scenario, which
-  # puts a populated map on screen about 13s after a cold boot - short enough to
-  # let the machine stop when idle instead.
+  # Kept warm deliberately. Starting Python, importing torch, loading the model and
+  # generating a scenario on one shared core takes 20-50s from cold, and varies too
+  # much between runs to design around. Idling costs a few dollars a month; a
+  # visitor meeting a 40-second blank page costs more.
   [[http_service.http_checks]]
     interval = "30s"
     timeout = "5s"

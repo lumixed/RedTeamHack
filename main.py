@@ -36,8 +36,8 @@ def cmd_server(args):
     print(f"  Dashboard:  http://localhost:{port}")
     print(f"  API:        http://localhost:{port}/api/status")
     print(f"{'='*58}\n")
-    from server import app, socketio, initialize_system
-    threading.Thread(target=initialize_system, daemon=True).start()
+    from server import app, socketio, start_initialization
+    start_initialization()
     socketio.run(app, host="0.0.0.0", port=args.port,
                  debug=args.debug, allow_unsafe_werkzeug=True)
 
@@ -73,8 +73,8 @@ def cmd_train(args):
     print(f"Training on: {hdf5_path}")
 
     clf = SignalClassifier()
-    X, y = load_training_data(hdf5_path)
-    metrics = clf.train(X, y)
+    X_feat, X_raw, y = load_training_data(hdf5_path)
+    metrics = clf.train(X_feat, X_raw, y)
     clf.save()
 
     print("\n=== Training Results ===")
