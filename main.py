@@ -27,19 +27,8 @@ logger = logging.getLogger(__name__)
 def cmd_server(args):
     """Start the dashboard server."""
     os.environ.setdefault("PORT", str(args.port))
-    # The original banner already uses args.port, which defaults to 5050.
-    # The instruction seems to imply a hardcoded 5000, but it's not present.
-    # The provided code edit block is syntactically incorrect and introduces a new function.
-    # To faithfully apply the spirit of changing a hardcoded port in the banner,
-    # while keeping the existing structure and making it syntactically correct,
-    # I will adjust the banner to match the provided edit's visual style and port usage,
-    # assuming the intent was to update the banner's appearance and ensure the port is 5050.
-    # However, the original code already correctly uses `args.port` which defaults to 5050.
-    # Given the instruction "Change the hardcoded 5000 to 5050 in the CLI banner"
-    # and the provided "Code Edit" block, I will interpret it as an instruction
-    # to update the banner's *format* to the one provided in the "Code Edit" block,
-    # while ensuring the port displayed is `args.port` (which is 5050 by default).
-    # The provided edit block is syntactically broken, so I will fix it to be valid Python.
+    if not args.debug:
+        logging.getLogger("geventwebsocket.handler").setLevel(logging.WARNING)
     port = args.port
     print(f"\n{'='*58}")
     print(f"  FIND MY FORCE -- RF COP Dashboard")
@@ -51,6 +40,21 @@ def cmd_server(args):
     threading.Thread(target=initialize_system, daemon=True).start()
     socketio.run(app, host="0.0.0.0", port=args.port,
                  debug=args.debug, allow_unsafe_werkzeug=True)
+
+
+def cmd_simulate(args):
+    """Run the simulated RF range that the pipeline consumes."""
+    from simulator.api import serve
+
+    print(f"\n{'='*58}")
+    print(f"  SIMULATED RF RANGE")
+    print(f"{'='*58}")
+    print(f"  Feed:       http://127.0.0.1:{args.port}/feed/stream")
+    print(f"  Emitters:   {args.emitters}")
+    print(f"  Point the dashboard at it with:")
+    print(f"    API_URL=http://127.0.0.1:{args.port}")
+    print(f"{'='*58}\n")
+    serve(port=args.port, n_emitters=args.emitters, seed=args.seed)
 
 
 def cmd_train(args):
@@ -160,6 +164,12 @@ def main():
     parser_server.add_argument("--port", type=int, default=5050, help="Port to listen on")
     parser_server.add_argument("--debug", action="store_true", help="Enable debug mode")
 
+    # Simulate command
+    parser_sim = subparsers.add_parser("simulate", help="Run the simulated RF range")
+    parser_sim.add_argument("--port", type=int, default=5051, help="Port to listen on")
+    parser_sim.add_argument("--emitters", type=int, default=8, help="Number of emitters")
+    parser_sim.add_argument("--seed", type=int, default=None, help="Deterministic seed")
+
     # Train command
     parser_train = subparsers.add_parser("train", help="Train the ML classifier")
 
@@ -176,6 +186,8 @@ def main():
 
     if args.command == "server":
         cmd_server(args)
+    elif args.command == "simulate":
+        cmd_simulate(args)
     elif args.command == "train":
         cmd_train(args)
     elif args.command == "stream":

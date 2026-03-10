@@ -9,6 +9,10 @@ import numpy as np
 import joblib
 import os
 import logging
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
 
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, HistGradientBoostingClassifier, VotingClassifier
@@ -45,6 +49,9 @@ CIVILIAN_LABELS = {
 ALL_KNOWN_LABELS = FRIENDLY_LABELS | HOSTILE_LABELS | CIVILIAN_LABELS
 
 MODEL_DIR = Path(__file__).parent.parent / "models"
+
+OOD_NU = 0.05
+OOD_PERCENTILE = 100 * OOD_NU
 
 
 def extract_features(iq_snapshot: list) -> np.ndarray:
@@ -323,92 +330,127 @@ def _kurtosis(x: np.ndarray) -> float:
     return float(np.mean(((x - mu) / sig) ** 4)) - 3.0
 
 
+class DeepSignalNet(nn.Module):
+    """
+    1D-CNN architecture for deep feature extraction from I/Q data.
+    Input: (Batch, 2, 128)
+    """
+    def __init__(self, num_classes=3, feature_mode=False):
+        super(DeepSignalNet, self).__init__()
+        self.feature_mode = feature_mode
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(2, 32, kernel_size=7, stride=1, padding=3),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            nn.Conv1d(32, 64, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            nn.Conv1d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1)
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, num_classes)
+        )
+
+    def forward(self, x):
+        # x: (B, 256) -> Reshape to (B, 2, 128)
+        x = x.view(-1, 2, 128)
+        features = self.conv_layers(x).squeeze(-1)
+        if self.feature_mode:
+            return features
+        return self.fc(features)
+
 class SignalClassifier:
     """
-    Two-stage signal classifier:
-    1. Friendly classifier: identifies known friendly signal types
-    2. Anomaly detector: flags out-of-distribution (hostile/civilian) signals
+    Three-stage signal classifier:
+    1. Deep CNN: extracts deep latent features from raw IQ
+    2. Hybrid Ensemble: combines CNN features with manual features
+    3. Anomaly detector: flags out-of-distribution (hostile/civilian) signals
     """
 
     def __init__(self):
+        self.cnn = None
         self.friendly_classifier = None
         self.scaler = QuantileTransformer(output_distribution='normal', n_quantiles=1000, random_state=42)
         self.label_encoder = LabelEncoder()
         self.anomaly_detector = None
         self.is_trained = False
-        self._ood_threshold = -0.1  # OneClassSVM decision threshold
+        self._ood_threshold = -0.1
         MODEL_DIR.mkdir(exist_ok=True)
 
-    def train(self, X: np.ndarray, y: np.ndarray) -> dict:
+    def train(self, X_feat: np.ndarray, X_raw: np.ndarray, y: np.ndarray) -> dict:
         """
         Train on labeled friendly IQ data.
-        X: (N, feature_dim) feature matrix
+        X_feat: (N, feature_dim) manual features
+        X_raw: (N, 256) raw IQ data
         y: (N,) string labels
         Returns training metrics dict.
         """
-        logger.info(f"Training on {len(X)} samples, {len(np.unique(y))} classes")
+        logger.info(f"Training on {len(X_feat)} samples, {len(np.unique(y))} classes")
 
-        # Scale features
-        X_scaled = self.scaler.fit_transform(X)
-
-        # Encode labels
+        # 1. Encode labels
         y_enc = self.label_encoder.fit_transform(y)
+        num_classes = len(self.label_encoder.classes_)
 
-        # Split for evaluation
+        # 2. Train Deep CNN Feature Extractor
+        logger.info("Training Deep 1D-CNN Feature Extractor...")
+        self.cnn = DeepSignalNet(num_classes=num_classes)
+        
+        # Prepare data for torch
+        X_raw_t = torch.tensor(X_raw, dtype=torch.float32)
+        y_t = torch.tensor(y_enc, dtype=torch.long)
+        dataset = TensorDataset(X_raw_t, y_t)
+        loader = DataLoader(dataset, batch_size=64, shuffle=True)
+        
+        optimizer = optim.Adam(self.cnn.parameters(), lr=0.001)
+        criterion = nn.CrossEntropyLoss()
+        
+        self.cnn.train()
+        for epoch in range(10): # Quick training for hackathon context
+            total_loss = 0
+            for batch_x, batch_y in loader:
+                optimizer.zero_grad()
+                outputs = self.cnn(batch_x)
+                loss = criterion(outputs, batch_y)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+            logger.info(f"CNN Epoch {epoch+1}/10, Loss: {total_loss/len(loader):.4f}")
+
+        # 3. Extract Deep Features
+        self.cnn.eval()
+        self.cnn.feature_mode = True
+        with torch.no_grad():
+            X_deep = self.cnn(X_raw_t).numpy()
+        self.cnn.feature_mode = False # Reset for normal use if needed
+
+        # 4. Hybridize Features (Manual + Deep)
+        X_hybrid = np.hstack([X_feat, X_deep])
+        logger.info(f"Hybrid feature vector dimension: {X_hybrid.shape[1]}")
+
+        # 5. Scale and Split
+        X_scaled = self.scaler.fit_transform(X_hybrid)
         X_tr, X_val, y_tr, y_val = train_test_split(
             X_scaled, y_enc, test_size=0.2, random_state=42, stratify=y_enc
         )
 
-        # Train multi-class friendly classifier (Optimized HGB with Search)
+        # 6. Train Ensemble Classifier (HGB + MLP)
+        logger.info("Training Hybrid Ensemble...")
         hgb = HistGradientBoostingClassifier(random_state=42, early_stopping=True)
-        
-        param_dist = {
-            'max_iter': [500, 1000, 1500],
-            'max_depth': [15, 20, 30],
-            'learning_rate': [0.01, 0.03, 0.05, 0.1],
-            'l2_regularization': [0.0, 0.1, 0.5, 1.0, 5.0],
-            'min_samples_leaf': [5, 10, 20, 50]
-        }
-        
-        search = RandomizedSearchCV(
-            hgb, param_distributions=param_dist, 
-            n_iter=20, cv=3, scoring='f1_macro', 
-            n_jobs=-1, random_state=42
-        )
-        
-        logger.info("Starting hyperparameter search...")
-        search.fit(X_tr, y_tr)
-        self.friendly_classifier = search.best_estimator_
-        logger.info(f"Best params: {search.best_params_}")
-
-        # Feature Importance Analysis (using RF as a proxy)
-        rf_proxy = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
-        rf_proxy.fit(X_tr, y_tr)
-        importances = rf_proxy.feature_importances_
-        logger.info(f"Top 5 Feature Importances: {np.sort(importances)[-5:][::-1]}")
-        top_indices = np.argsort(importances)[-10:]
-        logger.info(f"Top 10 Feature Indices: {top_indices}")
-
-        # Ensemble HGB with an MLP for non-linear decision boundaries
-        mlp = MLPClassifier(
-            hidden_layer_sizes=(128, 64), 
-            activation='relu', 
-            solver='adam', 
-            alpha=0.01,
-            max_iter=500,
-            early_stopping=True,
-            random_state=42
-        )
+        mlp = MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=500, early_stopping=True, random_state=42)
         
         voter = VotingClassifier(
-            estimators=[('hgb', self.friendly_classifier), ('mlp', mlp)],
+            estimators=[('hgb', hgb), ('mlp', mlp)],
             voting='soft'
         )
-        # Calibrate the ensemble probabilities
-        logger.info("Calibrating ensemble probabilities (Platt Scaling)...")
-        self.friendly_classifier = CalibratedClassifierCV(
-            voter, method='sigmoid', cv=3
-        )
+        self.friendly_classifier = CalibratedClassifierCV(voter, method='sigmoid', cv=3)
         self.friendly_classifier.fit(X_tr, y_tr)
 
         # Evaluate
@@ -419,27 +461,23 @@ class SignalClassifier:
             target_names=self.label_encoder.classes_,
             output_dict=True
         )
-        logger.info(f"Friendly classifier F1 (macro): {f1:.3f}")
+        logger.info(f"Hybrid Classifier F1 (macro): {f1:.3f}")
 
-        # Train One-Class SVM anomaly detector on friendly data only
-        # This learns the "friendly" manifold; unknown signals will be rejected
-        self.anomaly_detector = OneClassSVM(
-            kernel="rbf",
-            nu=0.05,  # 5% expected outlier fraction
-            gamma="scale",
-        )
+        # 7. Train One-Class SVM anomaly detector on friendly data only
+        self.anomaly_detector = OneClassSVM(kernel="rbf", nu=OOD_NU, gamma="scale")
         self.anomaly_detector.fit(X_tr)
 
-        # Calibrate threshold on validation set
+        # Calibrate the cutoff to the same outlier fraction the detector was fitted
+        # for. Setting it looser than nu overrides that fit and flags friendly
+        # signals as novel, which also splits their observations across
+        # association groups and forks duplicate tracks.
         scores = self.anomaly_detector.decision_function(X_val)
-        # Friendly samples should be +; we set threshold at 15th percentile
-        self._ood_threshold = float(np.percentile(scores, 15))
-        logger.info(f"OOD threshold calibrated at: {self._ood_threshold:.4f}")
-
+        self._ood_threshold = float(np.percentile(scores, OOD_PERCENTILE))
+        
         self.is_trained = True
         return {
             "f1_macro": round(f1, 4),
-            "n_samples": len(X),
+            "n_samples": len(X_feat),
             "classes": list(self.label_encoder.classes_),
             "per_class": {k: v for k, v in report.items() if k in self.label_encoder.classes_},
         }
@@ -449,45 +487,57 @@ class SignalClassifier:
         Classify a single IQ snapshot.
         Returns dict with label, confidence, is_friendly, is_anomaly.
         """
-        features = extract_features(iq_snapshot)
-        return self.predict_features(features.reshape(1, -1))[0]
+        raw_iq = np.array(iq_snapshot, dtype=np.float32)
+        if len(raw_iq) != 256:
+            raw_iq = np.pad(raw_iq, (0, max(0, 256 - len(raw_iq))))[:256]
+            
+        manual_features = extract_features(iq_snapshot)
+        return self.predict_hybrid(manual_features.reshape(1, -1), raw_iq.reshape(1, -1))[0]
 
-    def predict_features(self, X: np.ndarray) -> list:
+    def predict_hybrid(self, X_feat: np.ndarray, X_raw: np.ndarray) -> list:
         """
-        Classify a batch of pre-extracted features.
-        X: (N, feature_dim)
-        Returns list of dicts.
+        Classify using both manual and deep features.
         """
         if not self.is_trained:
-            return [self._unknown_result() for _ in range(len(X))]
+            return [self._unknown_result() for _ in range(len(X_feat))]
 
-        X_scaled = self.scaler.transform(X)
+        # 1. Extract Deep Features
+        self.cnn.eval()
+        self.cnn.feature_mode = True
+        with torch.no_grad():
+            X_raw_t = torch.tensor(X_raw, dtype=torch.float32)
+            X_deep = self.cnn(X_raw_t).numpy()
+        self.cnn.feature_mode = False
 
-        # Anomaly detection
+        # 2. Hybridize
+        X_hybrid = np.hstack([X_feat, X_deep])
+        X_scaled = self.scaler.transform(X_hybrid)
+
+        # 3. Anomaly detection
         ood_scores = self.anomaly_detector.decision_function(X_scaled)
         is_anomaly = ood_scores < self._ood_threshold
 
-        # Friendly classification (always run to get probabilities)
+        # 4. Friendly classification
         proba = self.friendly_classifier.predict_proba(X_scaled)
         pred_idx = np.argmax(proba, axis=1)
         pred_labels = self.label_encoder.inverse_transform(pred_idx)
         confidences = proba[np.arange(len(proba)), pred_idx]
 
         results = []
-        for i in range(len(X)):
-            feat = X[i]
+        for i in range(len(X_feat)):
+            feat = X_feat[i]
             features_dict = {
-                "amp_std": feat[1],
-                "freq_mean": feat[13],
-                "freq_std": feat[14],
-                "total_power": feat[17],
-                "spectral_flatness": feat[25],
-                "duty_cycle": feat[84],
-                "ask_ratio": feat[82],
-                "papr": feat[83],
-                "freq_linearity": feat[16],
-                "phase_jumps_180": feat[12],
-                "crest_factor": feat[7],
+                "amp_std": float(feat[1]),
+                "freq_mean": float(feat[13]),
+                "freq_std": float(feat[14]),
+                "total_power": float(feat[17]),
+                "spectral_flatness": float(feat[25]),
+                "duty_cycle": float(feat[84]),
+                "ask_ratio": float(feat[82]),
+                "papr": float(feat[83]),
+                "freq_linearity": float(feat[16]),
+                "phase_jumps_180": float(feat[12]),
+                "crest_factor": float(feat[7]),
             }
 
             friendly_conf = float(confidences[i])
@@ -537,7 +587,13 @@ class SignalClassifier:
         if path is None:
             path = str(MODEL_DIR / "classifier.joblib")
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        
+        # We need to handle the torch model separately or within the dict
+        cnn_state = self.cnn.state_dict() if self.cnn else None
+        
         joblib.dump({
+            "cnn_state": cnn_state,
+            "cnn_num_classes": len(self.label_encoder.classes_) if self.is_trained else 0,
             "friendly_classifier": self.friendly_classifier,
             "scaler": self.scaler,
             "label_encoder": self.label_encoder,
@@ -545,7 +601,7 @@ class SignalClassifier:
             "ood_threshold": self._ood_threshold,
             "is_trained": self.is_trained,
         }, path)
-        logger.info(f"Model saved to {path}")
+        logger.info(f"Model (Hybrid) saved to {path}")
 
     def load(self, path: str = None) -> bool:
         """Load model from disk. Returns True if successful."""
@@ -554,36 +610,41 @@ class SignalClassifier:
         if not os.path.exists(path):
             logger.warning(f"No saved model found at {path}")
             return False
+            
         data = joblib.load(path)
+        self.is_trained = data["is_trained"]
+        self.label_encoder = data["label_encoder"]
+        
+        if self.is_trained and data.get("cnn_state"):
+            num_classes = data.get("cnn_num_classes", len(self.label_encoder.classes_))
+            self.cnn = DeepSignalNet(num_classes=num_classes)
+            self.cnn.load_state_dict(data["cnn_state"])
+            self.cnn.eval()
+            
         self.friendly_classifier = data["friendly_classifier"]
         self.scaler = data["scaler"]
-        self.label_encoder = data["label_encoder"]
         self.anomaly_detector = data["anomaly_detector"]
         self._ood_threshold = data["ood_threshold"]
-        self.is_trained = data["is_trained"]
-        logger.info(f"Model loaded from {path}")
+        
+        logger.info(f"Model (Hybrid) loaded from {path}")
         return True
 
 
-def load_training_data(hdf5_path: str) -> tuple[np.ndarray, np.ndarray]:
+def load_training_data(hdf5_path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Load labeled IQ training data from HDF5 file.
-    The HDF5 file is expected to have datasets where the key is a string
-    representation of a tuple (label, instance_id), e.g., "('802.11a', 'instance_0')".
-    Returns (X_features, y_labels) arrays.
+    Returns (X_features, X_raw, y_labels) arrays.
     """
     import h5py
-    import ast # For safely evaluating string-encoded tuples
+    import ast
     logger.info(f"Loading training data from {hdf5_path}")
 
-    X_list = []
+    X_raw_list = []
     y_list = []
 
     with h5py.File(hdf5_path, "r") as f:
         for key in f.keys():
             try:
-                # Keys are 4-element tuples: (modulation, label, snr_int, sample_idx)
-                # e.g. "('fmcw', 'Radar-Altimeter', 8, 0)"
                 t = ast.literal_eval(key)
                 if not isinstance(t, tuple) or len(t) < 2:
                     continue
@@ -595,31 +656,23 @@ def load_training_data(hdf5_path: str) -> tuple[np.ndarray, np.ndarray]:
             data = dataset[()]
 
             if data.ndim == 2 and data.shape[1] == 256:
-                # Matrix of samples
                 for sample in data:
-                    X_list.append(sample)
+                    X_raw_list.append(sample)
                     y_list.append(label)
             elif data.ndim == 1 and len(data) == 256:
-                # Single sample
-                X_list.append(data)
+                X_raw_list.append(data)
                 y_list.append(label)
-            else:
-                logger.warning(f"Skipping dataset '{key}': unexpected shape {data.shape}")
 
-    if not X_list:
+    if not X_raw_list:
         raise ValueError("No data found in HDF5 file")
 
-    X_raw = np.array(X_list, dtype=np.float32)
+    X_raw = np.array(X_raw_list, dtype=np.float32)
     y_raw = np.array(y_list, dtype=str)
 
-    # Extract features in parallel
+    # Extract manual features in parallel
     from joblib import Parallel, delayed
     logger.info(f"Extracting features from {len(X_raw)} samples in parallel...")
     X_feat = np.array(Parallel(n_jobs=-1)(delayed(extract_features)(x) for x in X_raw))
 
-
     logger.info(f"Loaded {len(X_feat)} samples, shape={X_feat.shape}")
-    logger.info(f"Class distribution: {dict(zip(*np.unique(y_raw, return_counts=True)))}")
-
-
-    return X_feat, y_raw
+    return X_feat, X_raw, y_raw

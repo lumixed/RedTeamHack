@@ -41,13 +41,17 @@ let showTrails = true;
 let showProjections = true;
 let maxObsFeed = 50;
 let projectionPolylines = {}; // track_id → Leaflet polyline
+let lastObsCount = 0;
+let lastObsChangeAt = 0;
+
+const FEED_STALE_MS = 12000;
 
 
 // ── INIT MAP ───────────────────────────────────────────────────────────────
 function initMap() {
     map = L.map('map', {
-        center: [49.26, -123.25],
-        zoom: 13,
+        center: [49.258, -123.113],
+        zoom: 12,
         zoomControl: true,
         attributionControl: false,
     });
@@ -640,9 +644,36 @@ function updateFeedStats(stats) {
     document.getElementById('obs-count').textContent = stats.observations_received ?? 0;
     document.getElementById('submit-count').textContent = stats.submissions_sent ?? 0;
 
-    if (stats.start_time) {
-        document.getElementById('feed-status').textContent = 'LIVE';
-        document.getElementById('feed-status').className = 'status-val online';
+    const received = stats.observations_received ?? 0;
+    if (received !== lastObsCount) {
+        lastObsCount = received;
+        lastObsChangeAt = Date.now();
+    }
+    refreshFeedStatus();
+}
+
+// The feed is only live if observations are actually still arriving. A running
+// consumer thread or a configured API key proves nothing about the upstream.
+function refreshFeedStatus() {
+    const el = document.getElementById('feed-status');
+    if (!el) return;
+
+    let state, cls;
+    if (lastObsCount <= 0) {
+        state = 'NO DATA';
+        cls = 'status-val offline';
+    } else if (Date.now() - lastObsChangeAt > FEED_STALE_MS) {
+        state = 'STALE';
+        cls = 'status-val warning';
+    } else {
+        state = 'LIVE';
+        cls = 'status-val online';
+    }
+    el.textContent = state;
+    el.className = cls;
+
+    if (socket && socket.connected) {
+        updateSimState(state === 'LIVE' ? 'RECEIVING' : `FEED ${state}`, state === 'LIVE');
     }
 }
 
@@ -654,10 +685,6 @@ function updateSystemStatus(status) {
     if (status.classifier_trained) {
         document.getElementById('cls-status').textContent = 'TRAINED';
         document.getElementById('cls-status').className = 'status-val online';
-    }
-    if (status.api_key_set) {
-        document.getElementById('feed-status').textContent = 'RUNNING';
-        document.getElementById('feed-status').className = 'status-val online';
     }
 }
 
@@ -875,6 +902,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     setInterval(pollStatus, 10000);
     pollStatus();
+
+    setInterval(refreshFeedStatus, 3000);
+    refreshFeedStatus();
 
     map.on('click', () => {
         if (!selectedTrackId) {

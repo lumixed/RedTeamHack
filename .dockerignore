@@ -1,0 +1,15 @@
+.git
+.gitignore
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.env
+docs/
+data/*.h5
+data/*.hdf5
+models/
+*.md
+!data/README.txt
+.DS_Store

@@ -22,6 +22,9 @@ MAX_RSSI_DIFF_DB = 25.0
 # IQ similarity threshold (cosine similarity)
 MIN_IQ_COSINE_SIMILARITY = 0.5
 
+# How long to let an emission keep collecting receivers before grouping it
+GROUP_SETTLE_S = 0.6
+
 
 @dataclass
 class ObservationGroup:
@@ -162,9 +165,13 @@ class ObservationAssociator:
                 group_members.append(obs_j)
                 used.add(j)
 
-            # Only emit groups where the oldest observation is old enough to be complete,
-            # OR if force=True, OR if we have enough receivers for a good fix.
-            if force or len(group_members) >= 3:
+            # Wait for the emission to finish arriving before emitting the group.
+            # Flushing the moment a third receiver lands strands the remaining
+            # receivers in a second group, which then geolocates on its own and
+            # forks a duplicate track for the same emitter.
+            settled = (now - min(m["_added_at"] for m in group_members)) >= GROUP_SETTLE_S
+
+            if force or (settled and len(group_members) >= 3):
                 group = self._build_group(group_members)
                 groups.append(group)
             else:

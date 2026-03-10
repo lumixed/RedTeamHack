@@ -349,7 +349,8 @@ class TrackManager:
                 # Remove very old lost tracks
                 if age > 300.0:
                     del self._tracks[track.track_id]
-            elif track.state in [TRACK_STATES["CONFIRMED"], TRACK_STATES["TENTATIVE"]]:
+            elif track.state in [TRACK_STATES["CONFIRMED"], TRACK_STATES["TENTATIVE"],
+                                 TRACK_STATES["COASTING"]]:
                 if age > self.LOST_TIMEOUT_S:
                     track.state = TRACK_STATES["LOST"]
                     logger.info(f"Track {track.track_id} LOST")
